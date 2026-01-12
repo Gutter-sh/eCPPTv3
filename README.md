@@ -15,55 +15,37 @@ chmod +x ~/ecppt_exam_journal_aio.sh
 
 # load aliases / PATH helpers
 source ~/.bashrc
+
 2) Sync the correct wordlists (important)
-bash
-Copy code
 sync_wordlists
 mkcombo
+
 3) Create your exam workspace using the LOE subnet
 Replace the subnet with the one provided in the Letter of Engagement (LOE):
-
-bash
-Copy code
 makebox ExamNet 10.10.10.0/24
 cd ~/pentest-journal/boxes/ExamNet
+
 4) Run automated scan/enum
-bash
-Copy code
 enum --box ExamNet
+
 Outputs will be written to:
-
 01_scans/
-
 hosts/<ip>/scans/
-
 hosts/<ip>/enum/
-
 hosts/<ip>/loot/
 
 5) When you identify the DC / domain
 Edit the box config:
-
-bash
-Copy code
 nano box.conf
-Set:
 
-bash
-Copy code
+Set:
 DOMAIN="DOMAIN.LOCAL"
 DC_IP="x.x.x.x"
-Populate 04_ad/users.txt as you discover naming patterns, then rerun:
 
-bash
-Copy code
+Populate 04_ad/users.txt as you discover naming patterns, then rerun:
 enum --box ExamNet
+
 6) Crack any Kerberos hashes with John
-bash
-Copy code
 crack_john hosts/<ip>/loot/asrep.txt ~/pentest-journal/wordlists/passwords/xato-net-10-million-passwords-10000.txt
 crack_john hosts/<ip>/loot/asrep.txt ~/pentest-journal/wordlists/passwords/seasons.txt
 crack_john hosts/<ip>/loot/asrep.txt ~/pentest-journal/wordlists/passwords/months.txt
-makefile
-Copy code
-::contentReference[oaicite:0]{index=0}
