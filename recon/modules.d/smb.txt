@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+module_meta(){ echo "smb|1.0|low"; }
+
+module_detect(){
+  local facts="$1"
+  # shellcheck disable=SC1090
+  source "$facts"
+  [[ ",$OPEN_TCP," =~ ,445,|,139,|,135, ]]
+}
+
+module_run(){
+  local facts="$1" out="$2" scans="$3"
+  # shellcheck disable=SC1090
+  source "$facts"
+
+  mkdir -p "$out"
+  local logf="$out/smb.log"
+  : > "$logf"
+
+  echo "[*] Target: $HOST" >> "$logf"
+  echo "[*] OPEN_TCP: $OPEN_TCP" >> "$logf"
+
+  # Focused SMB NSE (safe + high signal)
+  if command -v nmap >/dev/null 2>&1; then
+    run_cmd "nmap_smb_scripts" 300 "$logf" -- \
+      "nmap -n -p 135,139,445 --script 'smb-os-discovery,smb-security-mode,smb2-time,nbstat,smb-enum-shares,smb-enum-users' -oN '$out/nmap_smb_scripts.txt' '$HOST'"
+  fi
+
+  # Anonymous share listing
+  if command -v smbclient >/dev/null 2>&1; then
+    run_cmd "smbclient_null_list" 90 "$logf" -- \
+      "smbclient -L '//$HOST/' -N"
+  else
+    echo "[!] smbclient not found; skipping." >> "$logf"
+  fi
+
+  # enum4linux-ng (if available)
+  if command -v enum4linux-ng >/dev/null 2>&1; then
+    run_cmd "enum4linux_ng" 420 "$logf" -- \
+      "enum4linux-ng -A '$HOST'"
+  else
+    echo "[!] enum4linux-ng not installed; skipping." >> "$logf"
+  fi
+
+  # NetExec (nxc) if available
+  if command -v nxc >/dev/null 2>&1; then
+    run_cmd "nxc_null" 180 "$logf" -- \
+      "nxc smb '$HOST' -u '' -p '' --shares --users --sessions"
+  fi
+
+  # If creds exist, do authenticated share + local admin check (still “enum”, not exploit)
+  if [[ -n "${USER:-}" && -n "${PASS:-}" ]]; then
+    if command -v nxc >/dev/null 2>&1; then
+      run_cmd "nxc_auth_basic" 240 "$logf" -- \
+        "nxc smb '$HOST' -u '$USER' -p '$PASS' --shares --sessions"
+    fi
+  fi
+}

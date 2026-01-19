@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+module_meta(){ echo "smb|1.1|low"; }
+
+module_detect(){
+  local facts="$1"
+  # shellcheck disable=SC1090
+  source "$facts"
+  [[ ",$OPEN_TCP," =~ ,445,|,139,|,135, ]]
+}
+
+module_run(){
+  local facts="$1" out="$2" scans="$3"
+  # shellcheck disable=SC1090
+  source "$facts"
+
+  mkdir -p "$out"
+  local logf="$out/smb.log"
+  : > "$logf"
+
+  echo "[*] Target: $HOST" >> "$logf"
+  echo "[*] OPEN_TCP: $OPEN_TCP" >> "$logf"
+
+  # -----------------------------
+  # 0) High-signal SMB fingerprint
+  # -----------------------------
+  if command -v nmap >/dev/null 2>&1; then
+    run_cmd "nmap_smb_fingerprint" 240 "$logf" -- \
+      "nmap -n -p 135,139,445 --script \"smb-os-discovery,smb-protocols,smb-security-mode,smb2-security-mode,nbstat\" -oN \"$out/nmap_smb_fingerprint.txt\" \"$HOST\""
+  fi
+
+  # ----------------------------------------
+  # 1) Safe vuln detection (NOT exploitation)
+  # ----------------------------------------
+  if command -v nmap >/dev/null 2>&1; then
+    run_cmd "nmap_smb_vulnchecks" 240 "$logf" -- \
+      "nmap -n -p 445 --script \"smb-vuln-ms08-067,smb-vuln-ms17-010\" -oN \"$out/nmap_smb_vulnchecks.txt\" \"$HOST\""
+  fi
+
+  # -------------------------
+  # 2) Anonymous / guest enum
+  # -------------------------
+  if command -v smbclient >/dev/null 2>&1; then
+    # default attempt
+    run_cmd "smbclient_null_list" 90 "$logf" -- \
+      "smbclient -L \"//$HOST/\" -N 2>&1 | tee \"$out/smbclient_null.txt\""
+
+    # XP/SMB1 fallback (NT1)
+    run_cmd "smbclient_null_list_nt1" 90 "$logf" -- \
+      "smbclient -L \"//$HOST/\" -N --option='client min protocol=NT1' --option='client max protocol=NT1' 2>&1 | tee \"$out/smbclient_null_nt1.txt\""
+  else
+    echo "[!] smbclient not found; skipping." >> "$logf"
+  fi
+
+  # -------------------------
+  # 3) rpcclient null fallback
+  # -------------------------
+  if command -v rpcclient >/dev/null 2>&1; then
+    run_cmd "rpc_srvinfo_null" 90 "$logf" -- \
+      "rpcclient -U \"\" -N \"$HOST\" -c \"srvinfo\" 2>&1 | tee \"$out/rpc_srvinfo_null.txt\""
+
+    run_cmd "rpc_netshareenum_null" 120 "$logf" -- \
+      "rpcclient -U \"\" -N \"$HOST\" -c \"netshareenum\" 2>&1 | tee \"$out/rpc_netshareenum_null.txt\""
+
+    run_cmd "rpc_enumdomusers_null" 150 "$logf" -- \
+      "rpcclient -U \"\" -N \"$HOST\" -c \"enumdomusers\" 2>&1 | tee \"$out/rpc_enumdomusers_null.txt\""
+  else
+    echo "[!] rpcclient not found; skipping." >> "$logf"
+  fi
+
+  # --------------------------
+  # 4) enum4linux-ng (wrapper)
+  # --------------------------
+  if command -v enum4linux-ng >/dev/null 2>&1; then
+    run_cmd "enum4linux_ng" 420 "$logf" -- \
+      "enum4linux-ng -A \"$HOST\" 2>&1 | tee \"$out/enum4linux-ng_A.txt\""
+  else
+    echo "[!] enum4linux-ng not installed; skipping." >> "$logf"
+  fi
+
+  # -----------------------
+  # 5) NetExec (nxc) checks
+  # -----------------------
+  if command -v nxc >/dev/null 2>&1; then
+    run_cmd "nxc_null" 180 "$logf" -- \
+      "nxc smb \"$HOST\" -u '' -p '' --shares --users --sessions 2>&1 | tee \"$out/nxc_null.txt\""
+  fi
+
+  # -----------------------------
+  # 6) Impacket no-pass fallbacks
+  # -----------------------------
+  if command -v impacket-lookupsid >/dev/null 2>&1; then
+    run_cmd "impacket_lookupsid" 180 "$logf" -- \
+      "impacket-lookupsid \"$HOST\" -no-pass 2>&1 | tee \"$out/impacket_lookupsid.txt\""
+  fi
+
+  if command -v impacket-samrdump >/dev/null 2>&1; then
+    run_cmd "impacket_samrdump" 180 "$logf" -- \
+      "impacket-samrdump \"$HOST\" -no-pass 2>&1 | tee \"$out/impacket_samrdump.txt\""
+  fi
+
+  # ----------------------------------------
+  # 7) Authenticated enum if creds are set
+  # ----------------------------------------
+  if [[ -n "${USER:-}" && -n "${PASS:-}" ]]; then
+    if command -v nxc >/dev/null 2>&1; then
+      run_cmd "nxc_auth_basic" 240 "$logf" -- \
+        "nxc smb \"$HOST\" -u \"$USER\" -p \"$PASS\" --shares --sessions 2>&1 | tee \"$out/nxc_auth_basic.txt\""
+    fi
+
+    if command -v rpcclient >/dev/null 2>&1; then
+      # DOMAIN is optional; rpcclient accepts user%pass
+      local u="$USER"
+      [[ -n "${DOMAIN:-}" ]] && u="${DOMAIN}/${USER}"
+      run_cmd "rpc_srvinfo_auth" 120 "$logf" -- \
+        "rpcclient -U \"$u%$PASS\" \"$HOST\" -c \"srvinfo\" 2>&1 | tee \"$out/rpc_srvinfo_auth.txt\""
+    fi
+  fi
+}

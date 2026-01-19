@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+module_meta(){ echo "dns|1.0|low"; }
+
+module_detect(){
+  local facts="$1"
+  source "$facts"
+  [[ ",$OPEN_TCP," =~ ,53, ]] || [[ ",$OPEN_UDP," =~ ,53, ]]
+}
+
+module_run(){
+  local facts="$1" out="$2" scans="$3"
+  source "$facts"
+  mkdir -p "$out"
+  local logf="$out/dns.log"
+  : > "$logf"
+
+  if command -v dig >/dev/null 2>&1; then
+    run_cmd "dig_version" 30 "$logf" -- "dig +short CHAOS TXT version.bind @'$HOST' || true"
+    run_cmd "dig_any" 30 "$logf" -- "dig +noall +answer @'$HOST' '$HOST' any || true"
+  else
+    echo "[!] dig not found; skipping." >> "$logf"
+  fi
+
+  # Zone transfer attempts only make sense if you know a domain
+  if [[ -n "${DOMAIN:-}" ]] && command -v dig >/dev/null 2>&1; then
+    run_cmd "axfr_try" 60 "$logf" -- "dig @'$HOST' '$DOMAIN' AXFR || true"
+  else
+    echo "[*] DOMAIN not set; skipping AXFR." >> "$logf"
+  fi
+}

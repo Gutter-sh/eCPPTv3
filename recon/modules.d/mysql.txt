@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+module_meta(){ echo "mysql|1.0|low"; }
+
+module_detect(){
+  local facts="$1"
+  source "$facts"
+  [[ ",$OPEN_TCP," =~ ,3306, ]]
+}
+
+module_run(){
+  local facts="$1" out="$2" scans="$3"
+  source "$facts"
+  mkdir -p "$out"
+  local logf="$out/mysql.log"
+  : > "$logf"
+
+  if command -v nmap >/dev/null 2>&1; then
+    run_cmd "nmap_mysql_scripts" 240 "$logf" -- \
+      "nmap -n -p 3306 --script 'mysql-info' -oN '$out/nmap_mysql.txt' '$HOST' || true"
+  fi
+
+  # Banner via nc
+  if command -v nc >/dev/null 2>&1; then
+    run_cmd "mysql_banner" 20 "$logf" -- "echo | nc -nv '$HOST' 3306 2>&1 | head -n 20 || true"
+  fi
+}

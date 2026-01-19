@@ -1,0 +1,280 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# =========================
+# Config (override via env)
+# =========================
+RECON_ROOT="${RECON_ROOT:-recon}"
+MODULES_DIR="${MODULES_DIR:-./modules.d}"
+MODE="${MODE:-standalone}"     # standalone | ecosystem
+
+USE_SUDO="${USE_SUDO:-1}"
+NO_DNS="${NO_DNS:-1}"
+OPEN_ONLY="${OPEN_ONLY:-1}"
+
+TIMING="${TIMING:--T4}"
+MIN_RATE="${MIN_RATE:-300}"
+MAX_RETRIES="${MAX_RETRIES:-3}"
+HOST_TIMEOUT="${HOST_TIMEOUT:-30m}"
+DO_UDP="${DO_UDP:-0}"
+
+# “loud” actions are OFF by default
+ENABLE_BRUTE="${ENABLE_BRUTE:-0}"
+ENABLE_HEAVY_WEB_FUZZ="${ENABLE_HEAVY_WEB_FUZZ:-0}"
+ENABLE_SMB_VULNCHECKS="${ENABLE_SMB_VULNCHECKS:-1}"   # safe NSE checks
+ENABLE_SMB_BRUTE="${ENABLE_SMB_BRUTE:-0}"             # only if you ever add spraying
+
+
+
+# Creds (optional)
+DOMAIN="${DOMAIN:-}"
+USER="${USER:-}"
+PASS="${PASS:-}"
+DC_IP="${DC_IP:-}"
+
+# Lists (optional)
+USERLIST="${USERLIST:-}"
+WORDLIST_DIRS="${WORDLIST_DIRS:-/usr/share/wordlists/dirb/common.txt}"
+
+# =========================
+# Core utilities
+# =========================
+die(){ echo "[!] $*" >&2; exit 1; }
+log(){ echo "[*] $*"; }
+have(){ command -v "$1" >/dev/null 2>&1; }
+sudo_prefix(){ [[ "$USE_SUDO" == "1" ]] && have sudo && echo "sudo" || echo ""; }
+sanitize(){ echo "$1" | tr '/:' '__' | tr -cd 'A-Za-z0-9._-'; }
+is_cidr(){ [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$ ]]; }
+
+# Run a command with: timeout + retry + logging (self-healing)
+# usage: run_cmd "<label>" <timeout_seconds> <outfile> -- <cmd...>
+run_cmd() {
+  local label="$1"; shift
+  local t="$1"; shift
+  local out="$1"; shift
+  [[ "$1" == "--" ]] || die "run_cmd missing --"
+  shift
+
+  local tmp="${out}.tmp"
+  local rc=0
+
+  {
+    echo "### CMD [$label] $(date -Is)"
+    echo "+ $*"
+  } >> "$out"
+
+  # Try once, then retry once on failure
+  for attempt in 1 2; do
+    if have timeout; then
+      timeout "${t}" bash -lc "$*" >> "$tmp" 2>&1 || rc=$?
+    else
+      bash -lc "$*" >> "$tmp" 2>&1 || rc=$?
+    fi
+    if [[ $rc -eq 0 ]]; then
+      cat "$tmp" >> "$out"
+      rm -f "$tmp"
+      return 0
+    fi
+    echo "[!] $label failed (attempt $attempt, rc=$rc)" >> "$out"
+    sleep 1
+  done
+
+  # Give up but continue pipeline
+  cat "$tmp" >> "$out" || true
+  rm -f "$tmp" || true
+  return 0
+}
+
+nmap_common() {
+  local args=()
+  [[ "$NO_DNS" == "1" ]] && args+=(-n)
+  [[ "$OPEN_ONLY" == "1" ]] && args+=(--open)
+  args+=("$TIMING" --min-rate "$MIN_RATE" --max-retries "$MAX_RETRIES" --host-timeout "$HOST_TIMEOUT" --reason)
+  echo "${args[@]}"
+}
+
+# Extract open ports from gnmap reliably enough for triggers
+extract_open_ports_csv() {
+  local gnmap="$1"
+  local tcp udp
+  tcp="$(awk -F'Ports: ' '/Ports: /{print $2}' "$gnmap" \
+    | tr ',' '\n' | awk '/\/open\/tcp\//{split($1,a,"/"); print a[1]}' \
+    | sort -n | uniq | paste -sd, - || true)"
+  udp="$(awk -F'Ports: ' '/Ports: /{print $2}' "$gnmap" \
+    | tr ',' '\n' | awk '/\/open\/udp\//{split($1,a,"/"); print a[1]}' \
+    | sort -n | uniq | paste -sd, - || true)"
+  echo "${tcp:-}" "${udp:-}"
+}
+
+# Lightweight classification (futureproof: only adds hints)
+classify_host() {
+  local tcp="$1"
+  # AD-ish
+  if [[ ",$tcp," =~ ,88, ]] && [[ ",$tcp," =~ ,389,|,636,|,3268,|,3269, ]]; then
+    echo "active_directory"
+    return
+  fi
+  # Windows member-ish
+  if [[ ",$tcp," =~ ,445, ]] && [[ ",$tcp," =~ ,5985,|,3389,|,135, ]]; then
+    echo "windows_member"
+    return
+  fi
+  # Web-ish
+  if [[ ",$tcp," =~ ,80,|,443,|,8080,|,8443, ]]; then
+    echo "web_host"
+    return
+  fi
+  echo "unknown"
+}
+
+write_facts() {
+  local host="$1" host_dir="$2" tcp="$3" udp="$4"
+  local likely; likely="$(classify_host "$tcp")"
+
+  cat > "$host_dir/facts.env" <<EOF
+HOST=$host
+OPEN_TCP=$tcp
+OPEN_UDP=$udp
+LIKELY=$likely
+DOMAIN=$DOMAIN
+USER=$USER
+PASS=$PASS
+DC_IP=$DC_IP
+ENABLE_BRUTE=$ENABLE_BRUTE
+ENABLE_HEAVY_WEB_FUZZ=$ENABLE_HEAVY_WEB_FUZZ
+ENABLE_SMB_VULNCHECKS=$ENABLE_SMB_VULNCHECKS
+ENABLE_SMB_BRUTE=$ENABLE_SMB_BRUTE
+USERLIST=$USERLIST
+WORDLIST_DIRS=$WORDLIST_DIRS
+EOF
+}
+
+gen_after_md() {
+  local host="$1" nmap_nmap="$2" out_md="$3"
+  {
+    echo "# After-Nmap Next Steps: $host"
+    echo
+    echo "## Open ports summary"
+    echo
+    echo "| Port | Proto | Service |"
+    echo "|---:|:---:|---|"
+    awk '/^[0-9]+\/(tcp|udp)[[:space:]]+open/{print}' "$nmap_nmap" \
+      | awk '{split($1,a,"/"); printf("| %s | %s | %s |\n", a[1], a[2], $3)}'
+    echo
+    echo "## Notes"
+    echo "- This is an auto-generated plan. Validate assumptions with evidence."
+  } > "$out_md"
+}
+
+# Module runner: loads each module file but isolates execution & marks done
+run_modules() {
+  local host_dir="$1"
+  # shellcheck disable=SC1090
+  source "$host_dir/facts.env"
+
+  mkdir -p "$host_dir/modules" "$host_dir/logs"
+  local ledger="$host_dir/logs/modules_ledger.log"
+  : > "$ledger"
+
+  for m in "$MODULES_DIR"/*.sh; do
+    [[ -f "$m" ]] || continue
+
+    # Each module must define: module_meta, module_detect, module_run
+    # We'll source it into a subshell to avoid state leaks
+    (
+      set -euo pipefail
+      # shellcheck disable=SC1090
+      source "$m"
+
+      local meta; meta="$(module_meta)"
+      local modname; modname="$(echo "$meta" | awk -F'|' '{print $1}')"
+      local modver; modver="$(echo "$meta" | awk -F'|' '{print $2}')"
+      local noise;  noise="$(echo "$meta" | awk -F'|' '{print $3}')"
+
+      local marker="$host_dir/modules/.done_${modname}"
+      if [[ -f "$marker" ]]; then
+        echo "SKIP|$modname|$modver|already_done" >> "$ledger"
+        exit 0
+      fi
+
+      if module_detect "$host_dir/facts.env"; then
+        mkdir -p "$host_dir/modules/$modname"
+        module_run "$host_dir/facts.env" "$host_dir/modules/$modname" "$host_dir/scans/nmap"
+        echo "OK|$modname|$modver|noise=$noise" >> "$ledger"
+        date -Is > "$marker"
+      else
+        echo "NO|$modname|$modver|not_applicable" >> "$ledger"
+      fi
+    ) || {
+      # Never crash pipeline because a module failed
+      echo "FAIL|$(basename "$m")|module_crashed" >> "$host_dir/logs/modules_ledger.log"
+      continue
+    }
+  done
+}
+
+scan_host() {
+  local host="$1" run_dir="$2"
+  local host_dir="$run_dir/hosts/$host"
+  mkdir -p "$host_dir/scans/nmap" "$host_dir/after" "$host_dir/logs"
+
+  local prefix="$host_dir/scans/nmap/nmap_${host}"
+
+  # Idempotent scan markers
+  if [[ ! -f "$host_dir/scans/nmap/.done_tcp" ]]; then
+    log "Nmap TCP: $host"
+    $(sudo_prefix) nmap $(nmap_common) -sS -p- -sV --version-all -sC -O --traceroute -oA "$prefix" "$host" \
+      | tee "$host_dir/scans/nmap/console.log"
+    date -Is > "$host_dir/scans/nmap/.done_tcp"
+  fi
+
+  if [[ "$DO_UDP" == "1" && ! -f "$host_dir/scans/nmap/.done_udp" ]]; then
+    log "Nmap UDP: $host"
+    $(sudo_prefix) nmap $([[ "$NO_DNS" == "1" ]] && echo "-n") -sU --top-ports 200 -sV \
+      $TIMING --max-retries "$MAX_RETRIES" --host-timeout "$HOST_TIMEOUT" -oA "$host_dir/scans/nmap/udp_${host}" "$host" \
+      | tee -a "$host_dir/scans/nmap/console.log"
+    date -Is > "$host_dir/scans/nmap/.done_udp"
+  fi
+
+  local tcp_csv udp_csv
+  read -r tcp_csv udp_csv < <(extract_open_ports_csv "${prefix}.gnmap")
+
+  write_facts "$host" "$host_dir" "$tcp_csv" "$udp_csv"
+  gen_after_md "$host" "${prefix}.nmap" "$host_dir/after/after_nmap.md"
+
+  run_modules "$host_dir"
+}
+
+# =========================
+# Main
+# =========================
+TARGET="${1:-}"
+[[ -n "$TARGET" ]] || die "Usage: $0 <ip|cidr|targets.txt>"
+
+TS="$(date +%Y%m%d_%H%M%S)"
+TAG="$(sanitize "$TARGET")"
+RUN_DIR="${RECON_ROOT}/${TS}_${TAG}"
+mkdir -p "$RUN_DIR/hosts"
+log "Run dir: $RUN_DIR"
+
+resolve_targets() {
+  if [[ -f "$TARGET" ]]; then
+    grep -vE '^\s*($|#)' "$TARGET"
+  elif is_cidr "$TARGET"; then
+    log "Discovery (-sn) for $TARGET"
+    $(sudo_prefix) nmap -sn $([[ "$NO_DNS" == "1" ]] && echo "-n") "$TARGET" -oG "$RUN_DIR/ping.gnmap" \
+      | tee "$RUN_DIR/ping.log"
+    awk '/Up$/{print $2}' "$RUN_DIR/ping.gnmap"
+  else
+    echo "$TARGET"
+  fi
+}
+
+resolve_targets > "$RUN_DIR/targets.resolved.txt"
+
+while read -r H; do
+  [[ -n "$H" ]] || continue
+  scan_host "$H" "$RUN_DIR"
+done < "$RUN_DIR/targets.resolved.txt"
+
+log "Done: $RUN_DIR"

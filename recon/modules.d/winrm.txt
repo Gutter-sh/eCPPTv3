@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+module_meta(){ echo "winrm|1.0|low"; }
+
+module_detect(){
+  local facts="$1"
+  source "$facts"
+  [[ ",$OPEN_TCP," =~ ,5985,|,5986, ]]
+}
+
+module_run(){
+  local facts="$1" out="$2" scans="$3"
+  source "$facts"
+  mkdir -p "$out"
+  local logf="$out/winrm.log"
+  : > "$logf"
+
+  echo "[*] WinRM ports detected on $HOST" >> "$logf"
+
+  # If creds exist, validate with netexec if available (no shell execution by default)
+  if [[ -n "${USER:-}" && -n "${PASS:-}" ]]; then
+    if command -v nxc >/dev/null 2>&1; then
+      run_cmd "nxc_winrm_auth" 120 "$logf" -- "nxc winrm '$HOST' -u '$USER' -p '$PASS' || true"
+    fi
+  else
+    echo "[*] No creds supplied; skipping auth checks." >> "$logf"
+  fi
+}

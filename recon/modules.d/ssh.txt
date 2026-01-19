@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+module_meta(){ echo "ssh|1.0|low"; }
+
+module_detect(){
+  local facts="$1"
+  source "$facts"
+  [[ ",$OPEN_TCP," =~ ,22, ]]
+}
+
+module_run(){
+  local facts="$1" out="$2" scans="$3"
+  source "$facts"
+  mkdir -p "$out"
+  local logf="$out/ssh.log"
+  : > "$logf"
+
+  # Grab SSH banner safely
+  if command -v nc >/dev/null 2>&1; then
+    run_cmd "ssh_banner" 20 "$logf" -- "echo | nc -nv '$HOST' 22 2>&1 | head -n 5 || true"
+  fi
+
+  # If ssh-audit is available
+  if command -v ssh-audit >/dev/null 2>&1; then
+    run_cmd "ssh_audit" 120 "$logf" -- "ssh-audit '$HOST' | head -n 120 || true"
+  fi
+}

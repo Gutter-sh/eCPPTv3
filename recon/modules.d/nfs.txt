@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+module_meta(){ echo "nfs|1.0|low"; }
+
+module_detect(){
+  local facts="$1"
+  source "$facts"
+  # NFS often: 111 (rpcbind) and/or 2049
+  [[ ",$OPEN_TCP," =~ ,111,|,2049, ]] || [[ ",$OPEN_UDP," =~ ,111,|,2049, ]]
+}
+
+module_run(){
+  local facts="$1" out="$2" scans="$3"
+  source "$facts"
+  mkdir -p "$out"
+  local logf="$out/nfs.log"
+  : > "$logf"
+
+  if command -v showmount >/dev/null 2>&1; then
+    run_cmd "showmount" 60 "$logf" -- "showmount -e '$HOST' || true"
+  else
+    echo "[!] showmount not found; skipping." >> "$logf"
+  fi
+
+  if command -v rpcinfo >/dev/null 2>&1; then
+    run_cmd "rpcinfo" 60 "$logf" -- "rpcinfo -p '$HOST' || true"
+  fi
+}

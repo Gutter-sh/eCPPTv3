@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+module_meta(){ echo "web|1.0|low"; }
+
+module_detect(){
+  local facts="$1"
+  source "$facts"
+  [[ ",$OPEN_TCP," =~ ,80,|,443,|,8080,|,8443,|,8000,|,8008,|,8888, ]]
+}
+
+module_run(){
+  local facts="$1" out="$2" scans="$3"
+  source "$facts"
+
+  mkdir -p "$out"
+  local logf="$out/web.log"
+  : > "$logf"
+
+  # Build list of likely URLs from open ports
+  local urls=()
+  if [[ ",$OPEN_TCP," =~ ,443, ]]; then urls+=("https://$HOST"); fi
+  if [[ ",$OPEN_TCP," =~ ,8443, ]]; then urls+=("https://$HOST:8443"); fi
+  if [[ ",$OPEN_TCP," =~ ,80, ]]; then urls+=("http://$HOST"); fi
+  if [[ ",$OPEN_TCP," =~ ,8080, ]]; then urls+=("http://$HOST:8080"); fi
+  if [[ ",$OPEN_TCP," =~ ,8000, ]]; then urls+=("http://$HOST:8000"); fi
+  if [[ ",$OPEN_TCP," =~ ,8888, ]]; then urls+=("http://$HOST:8888"); fi
+
+  printf "%s\n" "${urls[@]}" > "$out/urls.txt"
+
+  # Headers + quick tech
+  if command -v curl >/dev/null 2>&1; then
+    for u in "${urls[@]}"; do
+      run_cmd "headers_${u}" 30 "$logf" -- "curl -sS -I '$u' | sed 's/\r$//'"
+    done
+  fi
+
+  if command -v whatweb >/dev/null 2>&1; then
+    for u in "${urls[@]}"; do
+      run_cmd "whatweb_${u}" 60 "$logf" -- "whatweb -a 3 '$u'"
+    done
+  fi
+
+  # Light directory fuzz (safe default)
+  if command -v ffuf >/dev/null 2>&1 && [[ -f "$WORDLIST_DIRS" ]]; then
+    local base="${urls[0]:-}"
+    if [[ -n "$base" ]]; then
+      run_cmd "ffuf_light_dirs" 240 "$logf" -- \
+        "ffuf -u '${base}/FUZZ' -w '$WORDLIST_DIRS' -mc 200,204,301,302,307,401,403 -fs 0 -t 40 | tee '$out/ffuf_dirs.txt'"
+    fi
+  fi
+
+  # Heavy fuzz only if explicitly enabled
+  if [[ "${ENABLE_HEAVY_WEB_FUZZ:-0}" == "1" ]] && command -v ffuf >/dev/null 2>&1; then
+    if [[ -f /usr/share/seclists/Discovery/Web-Content/directory-list-2.3-medium.txt ]]; then
+      local base="${urls[0]:-}"
+      [[ -n "$base" ]] && run_cmd "ffuf_medium_dirs" 600 "$logf" -- \
+        "ffuf -u '${base}/FUZZ' -w /usr/share/seclists/Discovery/Web-Content/directory-list-2.3-medium.txt -mc 200,204,301,302,307,401,403 -fs 0 -t 60 | tee '$out/ffuf_medium.txt'"
+    fi
+  fi
+}
